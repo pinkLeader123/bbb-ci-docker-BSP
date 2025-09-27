@@ -87,7 +87,7 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Download artifacts
+      - name: Download uboot artifacts
         uses: actions/download-artifact@v4
         with:
           name: uboot-artifacts
@@ -105,13 +105,22 @@ jobs:
           name: rootfs-artifact
           path: downloaded/rootfs
 
+      # --- PHẦN ĐÃ CHỈNH SỬA Ở ĐÂY ---
       - name: Create BSP package (tar.gz)
         run: |
           mkdir -p out
+          # Lệnh tar đã được đơn giản hóa:
+          # -C downloaded: Thay đổi thư mục làm việc để nén là 'downloaded'
+          # Sau đó, chỉ cần liệt kê các thư mục con: uboot, kernel, rootfs
           tar czf out/bsp-full-$(date -u +"%Y%m%dT%H%M%SZ").tar.gz \
-            -C downloaded uboot \
-            -C downloaded kernel . \
-            -C downloaded rootfs .
+            -C downloaded uboot kernel rootfs
+          
+          echo "Kiểm tra nội dung thư mục downloaded/ trước khi nén:"
+          ls -R downloaded/ || true
+          
+          echo "Kiểm tra nội dung file tar:"
+          tar tzf out/bsp-full-*.tar.gz
+          
           ls -lh out
 
       - name: Upload BSP package
