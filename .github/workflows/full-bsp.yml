@@ -14,11 +14,21 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
+      # 1. Thêm Cache cho U-Boot
+      - name: Cache U-Boot source and build state
+        id: cache-uboot
+        uses: actions/cache@v4
+        with:
+          # Giả định script build sẽ sử dụng thư mục cache này
+          path: lab4-uboot/cache
+          key: ${{ runner.os }}-uboot-${{ hashFiles('lab4-uboot/Dockerfile', 'lab4-uboot/build_uboot.sh') }}
+
       - name: Build U-Boot Docker image
         run: docker build -t bsp-uboot lab4-uboot
 
       - name: Run U-Boot build in container
         run: |
+          # Giả định script build_uboot.sh sử dụng thư mục cache đã được tải
           docker run --rm -v ${{ github.workspace }}:/work -w /work bsp-uboot \
             bash -c "chmod +x ./lab4-uboot/build_uboot.sh && ./lab4-uboot/build_uboot.sh"
 
@@ -39,11 +49,21 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
+      # 2. Thêm Cache cho Kernel
+      - name: Cache Kernel source and build state
+        id: cache-kernel
+        uses: actions/cache@v4
+        with:
+          # Giả định kernel source được tải về và build trong thư mục 'lab5-kernel/cache'
+          path: lab5-kernel/cache
+          key: ${{ runner.os }}-kernel-${{ env.KERNEL_TAG }}-${{ env.DEFCONFIG }}-${{ hashFiles('lab5-kernel/build_kernel.sh') }}
+
       - name: Build Kernel Docker image
         run: docker build -t bsp-kernel lab5-kernel
 
       - name: Run Kernel build in container
         run: |
+          # Giả định script build_kernel.sh sử dụng thư mục cache đã được tải
           docker run --rm -v ${{ github.workspace }}:/work -w /work -e KERNEL_TAG=${{ env.KERNEL_TAG }} -e DEFCONFIG=${{ env.DEFCONFIG }} \
             bsp-kernel bash -c "chmod +x ./lab5-kernel/build_kernel.sh && ./lab5-kernel/build_kernel.sh"
 
@@ -64,11 +84,22 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
+      # 3. Thêm Cache cho Buildroot
+      - name: Cache Buildroot download (dl) directory
+        id: cache-rootfs
+        uses: actions/cache@v4
+        with:
+          # Buildroot thường lưu source đã tải về trong thư mục 'dl'
+          # Giả định Buildroot được đặt trong lab6-rootfs/buildroot
+          path: lab6-rootfs/cache/dl
+          key: ${{ runner.os }}-buildroot-${{ env.BUILDROOT_TAG }}-${{ env.BOARD_DEFCONFIG }}-${{ hashFiles('lab6-rootfs/build_rootfs.sh') }}
+
       - name: Build Buildroot Docker image
         run: docker build -t bsp-rootfs lab6-rootfs
 
       - name: Run Buildroot in container
         run: |
+          # Giả định script build_rootfs.sh trỏ Buildroot đến thư mục cache/dl đã được tải
           docker run --rm -v ${{ github.workspace }}:/work -w /work \
             -e BUILDROOT_TAG=${{ env.BUILDROOT_TAG }} -e BOARD_DEFCONFIG=${{ env.BOARD_DEFCONFIG }} \
             bsp-rootfs bash -c "chmod +x ./lab6-rootfs/build_rootfs.sh && ./lab6-rootfs/build_rootfs.sh"
@@ -105,7 +136,7 @@ jobs:
           name: rootfs-artifact
           path: downloaded/rootfs
 
-      # --- PHẦN ĐÃ CHỈNH SỬA Ở ĐÂY ---
+      # Lệnh tar đã được sửa lỗi trước đó
       - name: Create BSP package (tar.gz)
         run: |
           mkdir -p out
