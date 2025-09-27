@@ -1,0 +1,186 @@
+name: Full BSP CI/CD
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-uboot:
+    name: Build U-Boot
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Build U-Boot Docker image
+        run: docker build -t bsp-uboot lab4-uboot
+
+      - name: Run U-Boot build in container
+        run: |
+          docker run --rm -v ${{ github.workspace }}:/work -w /work bsp-uboot \
+            bash -c "chmod +x ./lab4-uboot/build_uboot.sh && ./lab4-uboot/build_uboot.sh"
+
+      - name: Upload U-Boot artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: uboot-artifacts
+          path: artifacts/uboot/**
+
+  build-kernel:
+    name: Build Kernel
+    needs: build-uboot
+    runs-on: ubuntu-22.04
+    env:
+      KERNEL_TAG: v6.1
+      DEFCONFIG: versatile_defconfig   # override to e.g. am335x_evm_defconfig for BBB
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Build Kernel Docker image
+        run: docker build -t bsp-kernel lab5-kernel
+
+      - name: Run Kernel build in container
+        run: |
+          docker run --rm -v ${{ github.workspace }}:/work -w /work -e KERNEL_TAG=${{ env.KERNEL_TAG }} -e DEFCONFIG=${{ env.DEFCONFIG }} \
+            bsp-kernel bash -c "chmod +x ./lab5-kernel/build_kernel.sh && ./lab5-kernel/build_kernel.sh"
+
+      - name: Upload kernel artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-artifacts
+          path: artifacts/kernel/**
+
+  build-rootfs:
+    name: Build RootFS (Buildroot)
+    needs: build-kernel
+    runs-on: ubuntu-22.04
+    env:
+      BUILDROOT_TAG: 2024.02.1
+      BOARD_DEFCONFIG: beaglebone_defconfig   # override if you want
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Build Buildroot Docker image
+        run: docker build -t bsp-rootfs lab6-rootfs
+
+      - name: Run Buildroot in container
+        run: |
+          docker run --rm -v ${{ github.workspace }}:/work -w /work \
+            -e BUILDROOT_TAG=${{ env.BUILDROOT_TAG }} -e BOARD_DEFCONFIG=${{ env.BOARD_DEFCONFIG }} \
+            bsp-rootfs bash -c "chmod +x ./lab6-rootfs/build_rootfs.sh && ./lab6-rootfs/build_rootfs.sh"
+
+      - name: Upload rootfs artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rootfs-artifact
+          path: artifacts/rootfs/**
+
+  package:
+    name: Package BSP
+    needs: [build-uboot, build-kernel, build-rootfs]
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: uboot-artifacts
+          path: downloaded/uboot
+
+      - name: Download kernel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: kernel-artifacts
+          path: downloaded/kernel
+
+      - name: Download rootfs artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: rootfs-artifact
+          path: downloaded/rootfs
+
+      - name: Create BSP package (tar.gz)
+        run: |
+          mkdir -p out
+          tar czf out/bsp-full-$(date -u +"%Y%m%dT%H%M%SZ").tar.gz \
+            -C downloaded uboot \
+            -C downloaded kernel . \
+            -C downloaded rootfs .
+          ls -lh out
+
+      - name: Upload BSP package
+        uses: actions/upload-artifact@v4
+        with:
+          name: bsp-package
+          path: out/*.tar.gz
+
+  qemu-test:
+    name: QEMU smoke test (optional)
+    needs: package
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Download BSP package
+        uses: actions/download-artifact@v4
+        with:
+          name: bsp-package
+          path: ./bsp_package
+
+      - name: Extract package
+        run: |
+          mkdir -p extracted
+          tar xzf bsp_package/*.tar.gz -C extracted
+
+      - name: Install QEMU
+        run: sudo apt-get update && sudo apt-get install -y qemu-system-arm
+
+      - name: Run QEMU smoke boot
+        run: |
+          set -euo pipefail
+          KIMG=$(find extracted -type f -name "zImage" | head -n1)
+          DTB=$(find extracted -type f -name "*.dtb" | head -n1)
+          RFS=$(find extracted -type f -name "rootfs.ext4" | head -n1)
+          echo "KIMG=$KIMG"
+          echo "DTB=$DTB"
+          echo "RFS=$RFS"
+
+          if [ -z "$KIMG" ] || [ -z "$DTB" ]; then
+            echo "Kernel or DTB missing — cannot run QEMU test."
+            exit 2
+          fi
+
+          # Prefer to boot with rootfs as virtio block (works with 'virt' machine if kernel supports virtio)
+          if [ -n "$RFS" ]; then
+            echo "Booting kernel with rootfs as virtio block..."
+            qemu-system-arm -M virt -m 512M -nographic \
+              -kernel "$KIMG" -dtb "$DTB" \
+              -append "console=ttyAMA0 root=/dev/vda rw rootwait" \
+              -drive file="$RFS",if=virtio,format=raw -serial mon:stdio > qemu.log 2>&1 &
+
+            QPID=$!
+            # wait some seconds for boot messages
+            echo "Waiting for QEMU to boot (max 120s)..."
+            timeout 120 bash -c 'until grep -m1 -E "login:|Welcome|Hello|init:.*running" qemu.log >/dev/null 2>&1; do sleep 2; done' || true
+            sleep 2
+            kill $QPID || true
+            tail -n 200 qemu.log || true
+
+            if grep -E "login:|Welcome|Hello|init:.*running" qemu.log >/dev/null 2>&1; then
+              echo "QEMU smoke test: OK (found login/init message)"
+              exit 0
+            else
+              echo "QEMU smoke test: FAILED (no expected message in qemu.log)"
+              exit 3
+            fi
+          else
+            echo "No rootfs.ext4 found. You may have built an initramfs instead or packaging differs."
+            exit 2
+          fi
